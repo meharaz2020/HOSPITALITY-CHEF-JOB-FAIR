@@ -1,11 +1,13 @@
 import dash
 import pandas as pd
+import numpy as np
 import psycopg2
 from sqlalchemy import create_engine
 from dash import dcc, html
 import dash.dash_table as dash_table
 from dash.dependencies import Input, Output
 import plotly.graph_objects as go
+import plotly.express as px
 
 # PostgreSQL database connection string using SQLAlchemy
 db_url = "postgresql://bumeharaz:nYAifKg7cKo93FwvcxSHDaJmeh0oMFH6@dpg-cummh65svqrc73fi5fc0-a.oregon-postgres.render.com/dbname_dk38"
@@ -15,8 +17,12 @@ engine = create_engine(db_url)
 
 # Function to fetch data from PostgreSQL database
 def fetch_data(query):
-    df = pd.read_sql(query, engine)
-    return df
+    try:
+        df = pd.read_sql(query, engine)
+        return df
+    except Exception as e:
+        print(f"Error fetching data: {e}")
+        return pd.DataFrame()
 
 # Fetching data for initial and auto-refresh
 def get_initial_data():
@@ -32,6 +38,13 @@ def get_initial_data():
 def get_hourly_data():
     query = """
     SELECT intervalstart, opidcount FROM public.opidintervalcounts ORDER BY intervalstart;
+    """
+    return fetch_data(query)
+
+# Add a new function to fetch transaction data
+def get_transaction_data():
+    query = """
+    SELECT hour, amount FROM Transactions ORDER BY hour;
     """
     return fetch_data(query)
 
@@ -96,7 +109,35 @@ app.layout = html.Div([
     dcc.Graph(id='interval-graph', style={'height': '60vh'}),
 
     # Auto-refresh every 30 seconds
-    dcc.Interval(id='interval-component', interval=30*1000, n_intervals=0)
+    dcc.Interval(id='interval-component', interval=30*1000, n_intervals=0),
+
+    # Additional layout for animated chart
+    html.H1("Hourly Transaction Data (9 AM - 4 PM)", style={'textAlign': 'center', 'color': '#4CAF50'}),
+    
+    dcc.Dropdown(
+        id='graph-type',
+        options=[
+            {'label': 'Line Chart', 'value': 'line'},
+            {'label': 'Bar Chart', 'value': 'bar'},
+            {'label': 'Scatter Plot', 'value': 'scatter'}
+        ],
+        value='line',
+        clearable=False,
+        style={'width': '50%', 'margin': 'auto'}
+    ),
+    
+    dcc.Graph(id='animated-chart'),
+    
+    html.Button("Start", id="start-button", n_clicks=0, 
+                style={'background-color': '#008CBA', 'color': 'white', 'font-size': '16px', 'padding': '10px 24px', 'border': 'none', 'cursor': 'pointer', 'border-radius': '5px'}),
+    
+    dcc.Interval(
+        id='animation-interval',
+        interval=1000,
+        n_intervals=0,
+        max_intervals=7,
+        disabled=True
+    )
 ])
 
 @app.callback(
@@ -112,7 +153,6 @@ def update_data(n):
     column_data = prepare_column_data(df)
 
     # Pie chart 1 - Total Registered vs Visitors
-   # Pie chart 1 - Total Registered vs Visitors
     pie_chart_1 = {
         'data': [
             go.Pie(
@@ -163,9 +203,7 @@ def update_data(n):
         )
     }
 
-
     return column_data, pie_chart_1, pie_chart_2, pie_chart_3
-
 
 @app.callback(
     Output('interval-graph', 'figure'),
@@ -254,12 +292,65 @@ def update_graph(plot_type):
 
     return figure
 
+@app.callback(
+    Output('animation-interval', 'disabled'),
+    Input('start-button', 'n_clicks')
+)
+def start_animation(n_clicks):
+    return False if n_clicks > 0 else True
+
+@app.callback(
+    Output('animated-chart', 'figure'),
+    [Input('animation-interval', 'n_intervals'),
+     Input('graph-type', 'value')]
+)
+def update_figure(n_intervals, graph_type):
+    # Fetch transaction data from the database
+    df = get_transaction_data()
+
+    # Debug: Print the DataFrame to verify its structure
+    # print("Transaction Data:", df)
+
+    # Ensure the data is sorted by hour
+    if not df.empty and 'hour' in df.columns:
+        df = df.sort_values(by='hour')
+
+        # Filter data up to the selected hour
+        selected_hour = min(9 + n_intervals, 16)
+        filtered_df = df[df["hour"] <= selected_hour]
+        
+        if graph_type == 'line':
+            fig = px.line(filtered_df, x="hour", y="amount", markers=True,
+                          title="Transaction Amounts Over Time", line_shape='linear',
+                          color_discrete_sequence=['#FF5733'])
+            fig.update_traces(mode='lines+markers',
+                              marker=dict(size=10, line=dict(width=2, color='black')))
+        elif graph_type == 'bar':
+            fig = px.bar(filtered_df, x="hour", y="amount",
+                         title="Transaction Amounts Over Time", color="amount",
+                         color_continuous_scale='Bluered')
+        else:
+            fig = px.scatter(filtered_df, x="hour", y="amount", size="amount",
+                             title="Transaction Amounts Over Time", color="amount",
+                             color_continuous_scale='Viridis')
+        
+        fig.update_layout(
+            yaxis=dict(title='Amount (Taka)', gridcolor='lightgray'), 
+            xaxis=dict(title='Hour', gridcolor='lightgray'),
+            plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='#F4F6F6'
+        )
+        return fig
+    else:
+        # Handle case where data is empty or columns are missing
+        return go.Figure()
+
 # Fetch data for initial load
 df = fetch_data("""
     SELECT intervalstart, opidcount FROM public.opidintervalcounts ORDER BY intervalstart;
 """)
 hourly_data = prepare_hourly_data(df)
 server = app.server
+
 # Run app
 if __name__ == '__main__':
     app.run_server(debug=True)
